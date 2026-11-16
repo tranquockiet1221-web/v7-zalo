@@ -145,7 +145,7 @@
 </head>
 <body>
 
-    <audio id="bg-music" loop="false" preload="auto" playsinline></audio>
+    <audio id="bg-music" preload="auto" playsinline crossorigin="anonymous"></audio>
 
     <div class="music-toggle" id="music-btn" role="button" tabindex="0" aria-label="Bật nhạc" onclick="toggleMusic()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleMusic();}">
         <svg id="icon-muted" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -466,6 +466,8 @@
         let trackIndex = 0;
         let musicUnlocked = false;
         let userPaused = false;
+        let audioCtx = null;
+        let sourceNode = null;
 
         function updateMusicUI(playing) {
             if (!musicBtn || !iconMuted || !iconPlaying) return;
@@ -475,79 +477,96 @@
             iconPlaying.style.display = playing ? 'block' : 'none';
         }
 
+        async function playWithWebAudio() {
+            if (userPaused || playlist.length === 0) return;
+            
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
+                }
+
+                const response = await fetch(playlist[trackIndex]);
+                const arrayBuffer = await response.arrayBuffer();
+                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+                if (sourceNode) {
+                    sourceNode.stop();
+                }
+                sourceNode = audioCtx.createBufferSource();
+                sourceNode.buffer = audioBuffer;
+                sourceNode.connect(audioCtx.destination);
+                
+                sourceNode.onended = () => {
+                    updateMusicUI(false);
+                    nextTrack();
+                };
+                
+                sourceNode.start(0);
+                musicUnlocked = true;
+                updateMusicUI(true);
+            } catch (err) {
+                console.error("Lỗi WebAudio:", err);
+                bgMusic.src = playlist[trackIndex];
+                bgMusic.play().catch(e => updateMusicUI(false));
+            }
+        }
+
         async function loadPlaylist() {
             try {
                 const res = await fetch(`${window.location.protocol}//${window.location.host}/api/music_list`);
                 const data = await res.json();
                 if (data.success && data.tracks.length > 0) {
                     playlist = data.tracks;
-                    bgMusic.src = playlist[0];
                 }
             } catch (e) {
                 console.error('Không tải được playlist:', e);
             }
         }
 
-        async function playCurrent() {
-            if (userPaused) return;
-            try {
-                await bgMusic.play();
-                musicUnlocked = true;
-            } catch (err) {
-                musicUnlocked = false;
+        function nextTrack() {
+            if (playlist.length === 0) return;
+            trackIndex = (trackIndex + 1) % playlist.length;
+            if (audioCtx) {
+                playWithWebAudio();
+            } else {
+                bgMusic.src = playlist[trackIndex];
+                bgMusic.play().catch(e => updateMusicUI(false));
+            }
+        }
+
+        async function toggleMusic() {
+            if (userPaused) {
+                userPaused = false;
+                if (audioCtx) {
+                    audioCtx.resume();
+                    playWithWebAudio();
+                } else {
+                    bgMusic.play().catch(e => updateMusicUI(false));
+                }
+            } else {
+                userPaused = true;
+                if (sourceNode) sourceNode.stop();
+                if (audioCtx) audioCtx.suspend();
+                bgMusic.pause();
                 updateMusicUI(false);
             }
         }
 
-        function nextTrack() {
-            if (playlist.length === 0) return;
-            trackIndex = (trackIndex + 1) % playlist.length;
-            bgMusic.src = playlist[trackIndex];
-            bgMusic.load();
-            playCurrent();
-        }
-
-        async function toggleMusic() {
-            if (!bgMusic) return;
-            if (!bgMusic.paused) {
-                userPaused = true;
-                bgMusic.pause();
-                return;
-            }
-            userPaused = false;
-            if (!bgMusic.src && playlist.length > 0) {
-                bgMusic.src = playlist[trackIndex];
-            }
-            await playCurrent();
-        }
-
-        bgMusic.addEventListener('play', () => updateMusicUI(true));
-        bgMusic.addEventListener('pause', () => updateMusicUI(false));
-        bgMusic.addEventListener('ended', () => {
-            updateMusicUI(false);
-            nextTrack();
-        });
-        bgMusic.addEventListener('error', () => {
-            console.error('Lỗi audio:', bgMusic.error);
-            nextTrack();
-        });
-
         function firstGestureUnlock() {
             if (!musicUnlocked && !userPaused) {
-                playCurrent();
+                playWithWebAudio();
             }
             document.removeEventListener('click', firstGestureUnlock);
             document.removeEventListener('touchstart', firstGestureUnlock);
-            document.removeEventListener('keydown', firstGestureUnlock);
         }
         document.addEventListener('click', firstGestureUnlock, { passive: true });
         document.addEventListener('touchstart', firstGestureUnlock, { passive: true });
-        document.addEventListener('keydown', firstGestureUnlock, { passive: true });
 
         (async () => {
             await loadPlaylist();
-            await playCurrent();
-            updateMusicUI(!bgMusic.paused);
         })();
 
         window.onload = async function() {
